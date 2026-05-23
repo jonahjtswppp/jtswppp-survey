@@ -344,6 +344,50 @@
 
   .total-allocated span:first-child { font-size: 13px; opacity: 0.7; }
   .total-allocated span:last-child { font-size: 18px; font-weight: 700; }
+
+  /* Company name field */
+  .company-field {
+    background: var(--white);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 16px 18px;
+    margin-bottom: 16px;
+  }
+
+  .company-field label {
+    display: block;
+    font-size: 12px;
+    font-weight: 600;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    color: var(--text-muted);
+    margin-bottom: 8px;
+  }
+
+  .company-field input {
+    width: 100%;
+    font-size: 15px;
+    font-weight: 500;
+    color: var(--text);
+    border: 1.5px solid var(--border);
+    border-radius: var(--radius-sm);
+    padding: 9px 12px;
+    background: var(--bg);
+    outline: none;
+    transition: border-color 0.15s;
+  }
+
+  .company-field input:focus { border-color: var(--mid); background: #fff; }
+  .company-field input::placeholder { color: #b0b8c1; font-weight: 400; }
+
+  /* Submit error message */
+  .submit-error {
+    font-size: 13px;
+    color: var(--danger);
+    margin-top: 10px;
+    display: none;
+    text-align: center;
+  }
 </style>
 </head>
 <body>
@@ -357,6 +401,11 @@
   </div>
 
   <div class="container">
+    <div class="company-field">
+      <label for="companyName">Your company name</label>
+      <input type="text" id="companyName" placeholder="e.g. Smith Construction" autocomplete="organization" />
+    </div>
+
     <div class="budget-card">
       <div class="budget-top">
         <span class="budget-label">Remaining budget</span>
@@ -372,8 +421,9 @@
 
     <div class="actions">
       <button class="btn-reset" onclick="resetAll()">Reset</button>
-      <button class="btn-submit" id="submitBtn" onclick="showResults()" disabled>Submit</button>
+      <button class="btn-submit" id="submitBtn" onclick="submitSurvey()" disabled>Submit</button>
     </div>
+    <p class="submit-error" id="submitError"></p>
   </div>
 </div>
 
@@ -505,6 +555,45 @@ function resetAll() {
   vals = new Array(FEATURES.length).fill(0);
   buildList();
   updateBudget();
+}
+
+const FEATURE_KEYS = [
+  "live_camera_dashboard",
+  "homeowner_portal",
+  "compliance_documents",
+  "hourly_photo_log",
+  "build_timelapse",
+  "motion_activated_security",
+  "view_and_pay_invoices",
+];
+
+async function submitSurvey() {
+  const btn = document.getElementById('submitBtn');
+  const errEl = document.getElementById('submitError');
+  errEl.style.display = 'none';
+  btn.disabled = true;
+  btn.textContent = 'Submitting…';
+
+  const payload = { company_name: (document.getElementById('companyName').value || '').trim() };
+  FEATURE_KEYS.forEach((key, i) => { payload[key] = vals[i]; });
+
+  try {
+    const res = await fetch('/submit', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+    const json = await res.json();
+    if (!res.ok || !json.ok) {
+      throw new Error(json.error || 'Submission failed. Please try again.');
+    }
+    showResults();
+  } catch (err) {
+    errEl.textContent = err.message;
+    errEl.style.display = 'block';
+    btn.disabled = false;
+    btn.textContent = 'Submit';
+  }
 }
 
 function showResults() {
