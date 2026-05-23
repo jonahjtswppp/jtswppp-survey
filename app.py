@@ -1,6 +1,8 @@
 import os
+import csv
+import io
 import psycopg2
-from flask import Flask, request, jsonify, send_from_directory
+from flask import Flask, request, jsonify, send_from_directory, Response
 from datetime import datetime, timezone
 
 app = Flask(__name__)
@@ -105,6 +107,28 @@ def submit():
         return jsonify({"ok": False, "error": "Database error. Please try again."}), 500
 
     return jsonify({"ok": True})
+
+
+@app.route("/export")
+def export():
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute("SELECT * FROM survey_responses ORDER BY submitted_at ASC")
+    rows = cur.fetchall()
+    col_names = [desc[0] for desc in cur.description]
+    cur.close()
+    conn.close()
+
+    output = io.StringIO()
+    writer = csv.writer(output)
+    writer.writerow(col_names)
+    writer.writerows(rows)
+
+    return Response(
+        output.getvalue(),
+        mimetype="text/csv",
+        headers={"Content-Disposition": "attachment; filename=survey_responses.csv"}
+    )
 
 
 if DATABASE_URL:
