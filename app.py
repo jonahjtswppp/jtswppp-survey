@@ -478,8 +478,14 @@ SURVEY_FEATURES = [
 ]
 
 
+# Without a timeout, psycopg2.connect blocks until the OS gives up (minutes),
+# which leaves the browser waiting forever on "Submitting...". Fail fast instead
+# so the employee gets a real error they can act on.
+DB_CONNECT_TIMEOUT = 10
+
+
 def get_db():
-    return psycopg2.connect(DATABASE_URL)
+    return psycopg2.connect(DATABASE_URL, connect_timeout=DB_CONNECT_TIMEOUT)
 
 
 def init_db():
@@ -692,19 +698,35 @@ def quiz_submit():
         vals += [q["choices"][answers[q["id"]]], results_by_id[q["id"]]["is_correct"]]
 
     placeholders = ", ".join(["%s"] * len(vals))
-    try:
+    statement = f"INSERT INTO quiz_attempts ({', '.join(cols)}) VALUES ({placeholders})"
+
+    def do_insert():
         conn = get_db()
         cur = conn.cursor()
-        cur.execute(
-            f"INSERT INTO quiz_attempts ({', '.join(cols)}) VALUES ({placeholders})",
-            vals,
-        )
+        cur.execute(statement, vals)
         conn.commit()
         cur.close()
         conn.close()
+
+    try:
+        try:
+            do_insert()
+        except psycopg2.Error:
+            # The table or a column may be missing because init_db() could not
+            # run at startup. Repair the schema once and retry before giving up,
+            # so a bad boot does not permanently stop scores being recorded.
+            app.logger.warning("Insert failed; re-running init_db() and retrying.")
+            init_db()
+            do_insert()
     except Exception as e:
-        app.logger.error("DB error saving attempt: %s", e)
-        return jsonify({"ok": False, "error": "Could not save your score. Please submit again."}), 500
+        # Log the full detail for the deploy logs, and send back the error class
+        # so a failure is diagnosable from the browser without digging.
+        app.logger.error("DB error saving attempt: %s: %s", type(e).__name__, e)
+        return jsonify({
+            "ok": False,
+            "error": "Could not save your score. Please tell your manager.",
+            "detail": f"{type(e).__name__}: {str(e)[:200]}",
+        }), 500
 
     result["recorded"] = True
     return jsonify(result)
@@ -966,6 +988,77 @@ def admin_attempt(attempt_id):
     ))
 
 
+@app.route("/admin/health")
+def admin_health():
+    """Diagnostics for 'the quiz will not submit'. Reports whether the database
+    is configured, reachable, and shaped the way an insert needs."""
+    denied = require_admin()
+    if denied:
+        return denied
+
+    report = {
+        "database_url_set": bool(DATABASE_URL),
+        "quiz_version": QUIZ_VERSION,
+        "active_questions": TOTAL_QUESTIONS,
+        "connect_timeout_seconds": DB_CONNECT_TIMEOUT,
+        "startup_db_error": STARTUP_DB_ERROR,
+    }
+
+    if not DATABASE_URL:
+        report["verdict"] = ("DATABASE_URL is not set. Attach a Postgres service "
+                             "in Railway; scores cannot be saved without it.")
+        return jsonify(report), 503
+
+    try:
+        started = datetime.now(timezone.utc)
+        conn = get_db()
+        cur = conn.cursor()
+        cur.execute("SELECT 1")
+        report["connected"] = True
+        report["connect_seconds"] = round(
+            (datetime.now(timezone.utc) - started).total_seconds(), 2)
+
+        cur.execute("""
+            SELECT column_name, is_nullable
+            FROM information_schema.columns
+            WHERE table_name = 'quiz_attempts'
+        """)
+        cols = {name: nullable for name, nullable in cur.fetchall()}
+        report["table_exists"] = bool(cols)
+        report["column_count"] = len(cols)
+
+        # The two things that actually break an insert.
+        missing = [c for c in ATTEMPT_COLUMNS if c not in cols]
+        report["missing_columns"] = missing
+        not_null_blockers = sorted(
+            c for c, nullable in cols.items()
+            if nullable == "NO" and c not in ATTEMPT_COLUMNS and c != "id"
+        )
+        report["not_null_columns_we_never_write"] = not_null_blockers
+
+        cur.execute("SELECT COUNT(*) FROM quiz_attempts")
+        report["attempts_stored"] = cur.fetchone()[0]
+        cur.close()
+        conn.close()
+
+        if missing:
+            report["verdict"] = f"Insert will fail: missing columns {missing}."
+        elif not_null_blockers:
+            report["verdict"] = (
+                f"Insert will fail: {not_null_blockers} are NOT NULL but are never "
+                "written. The startup migration should have dropped these.")
+        else:
+            report["verdict"] = "Healthy. Inserts should succeed."
+        return jsonify(report)
+
+    except Exception as e:
+        report["connected"] = False
+        report["error"] = f"{type(e).__name__}: {str(e)[:300]}"
+        report["verdict"] = ("Cannot reach the database. Check that the Postgres "
+                             "service is attached to this service in Railway.")
+        return jsonify(report), 500
+
+
 @app.route("/admin/scores.csv")
 def admin_scores_csv():
     denied = require_admin()
@@ -1068,8 +1161,18 @@ def export():
     )
 
 
+STARTUP_DB_ERROR = None
+
 if DATABASE_URL:
-    init_db()
+    try:
+        init_db()
+    except Exception as _e:
+        # A database that is slow or briefly unreachable at deploy time must not
+        # take the whole site down -- an uncaught error here kills the gunicorn
+        # worker and every route 502s, including the pages that would explain
+        # why. Record it, keep serving, and surface it at /admin/health.
+        STARTUP_DB_ERROR = f"{type(_e).__name__}: {_e}"
+        app.logger.error("init_db() failed at startup: %s", STARTUP_DB_ERROR)
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))

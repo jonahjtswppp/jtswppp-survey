@@ -600,6 +600,10 @@ async function submitQuiz() {
   btn.disabled = true;
   btn.textContent = 'Submitting…';
 
+  // Never let a stalled request leave the button stuck on "Submitting...".
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 30000);
+
   try {
     const res = await fetch('/quiz/submit', {
       method: 'POST',
@@ -610,15 +614,33 @@ async function submitQuiz() {
         // The order this employee saw, so the results review matches it.
         order: questions.map(q => q.id),
       }),
+      signal: controller.signal,
     });
-    const json = await res.json();
-    if (!res.ok || !json.ok) throw new Error(json.error || 'Submission failed. Please try again.');
+
+    // A crashed or proxied-away server returns HTML, not JSON. Read the body as
+    // text first so that case gives a real message instead of a parse error.
+    const raw = await res.text();
+    let json;
+    try {
+      json = JSON.parse(raw);
+    } catch (e) {
+      throw new Error('Server error ' + res.status + '. Please tell your manager.');
+    }
+
+    if (!res.ok || !json.ok) {
+      throw new Error((json.error || 'Submission failed.')
+        + (json.detail ? ' (' + json.detail + ')' : ''));
+    }
     showResults(json);
   } catch (err) {
-    msg.textContent = err.message;
+    msg.textContent = err.name === 'AbortError'
+      ? 'The server did not respond. Your answers are still here — check your signal and press Submit again.'
+      : err.message;
     msg.style.display = 'block';
     btn.disabled = false;
     btn.textContent = 'Submit quiz';
+  } finally {
+    clearTimeout(timer);
   }
 }
 
