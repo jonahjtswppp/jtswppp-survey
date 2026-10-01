@@ -684,6 +684,11 @@ function showResults(r) {
     card.innerHTML = html;
     list.appendChild(card);
   });
+
+  // Actually reveal the results. Without this the attempt is graded and saved
+  // but the employee keeps staring at the quiz screen and a disabled
+  // "Submitting..." button, with no way to tell it worked.
+  show('resultsScreen');
 }
 
 /* Reflect the server's question count and pass threshold on the start screen,
